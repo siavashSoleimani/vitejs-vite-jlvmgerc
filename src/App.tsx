@@ -14,6 +14,11 @@ export default function App(){
  const [modal,setModal]=useState<"survey"|"question"|"option"|"user"|"answer"|null>(null),[busy,setBusy]=useState(false),[notice,setNotice]=useState("");
  const [surveyForm,setSurveyForm]=useState({id:0,title:"",description:"",is_active:true});
  const [qForm,setQForm]=useState({id:0,text:""}),[oForm,setOForm]=useState({id:0,question_id:0,text:""});
+ const [sharedOptions,setSharedOptions]=useState<string[]>([
+  "می‌پسندم",
+  "نمی‌پسندم",
+  "نظری ندارم"
+]);
  const [uForm,setUForm]=useState({id:"",username:"",full_name:"",email:"",password:"",is_admin:false,is_active:true,can_view_surveys:true,can_view_answers:true});
  const [answerSurvey,setAnswerSurvey]=useState<Survey|null>(null),[answers,setAnswers]=useState<Record<number,number>>({}),[suggestion,setSuggestion]=useState("");
  const [completions,setCompletions]=useState<any[]>([]),[viewUser,setViewUser]=useState<Profile|null>(null),[viewSurvey,setViewSurvey]=useState<Survey|null>(null);
@@ -55,7 +60,146 @@ export default function App(){
  useEffect(()=>{if(!profile)return;loadSurveys();loadCompletions();if(profile.is_admin){loadUsers();loadVotes();loadSuggestions()}},[profile]);
  const saveSurvey=async(e:React.FormEvent)=>{e.preventDefault();if(!surveyForm.title.trim())return;const payload={title:surveyForm.title.trim(),description:surveyForm.description.trim()||null,is_active:surveyForm.is_active,updated_at:new Date().toISOString()};const r=surveyForm.id?await supabase.from("surveys").update(payload).eq("id",surveyForm.id):await supabase.from("surveys").insert(payload);if(r.error)return setNotice(r.error.message);setModal(null);await loadSurveys()};
  const removeSurvey=async(id:number)=>{if(!confirm("نظرسنجی حذف شود؟"))return;const r=await supabase.from("surveys").delete().eq("id",id);if(r.error)setNotice(r.error.message);else await loadSurveys()};
- const saveQuestion=async(e:React.FormEvent)=>{e.preventDefault();if(!selected||!qForm.text.trim())return;const order=questions.reduce((m,x)=>Math.max(m,x.question_order),0)+1;const r=qForm.id?await supabase.from("survey_questions").update({question_text:qForm.text.trim()}).eq("id",qForm.id):await supabase.from("survey_questions").insert({survey_id:selected.id,question_text:qForm.text.trim(),question_order:order});if(r.error){setNotice("خطا در ذخیره سؤال: "+r.error.message);return}setModal(null);await structure(selected.id)};
+ //const saveQuestion=async(e:React.FormEvent)=>{e.preventDefault();if(!selected||!qForm.text.trim())return;const order=questions.reduce((m,x)=>Math.max(m,x.question_order),0)+1;const r=qForm.id?await supabase.from("survey_questions").update({question_text:qForm.text.trim()}).eq("id",qForm.id):await supabase.from("survey_questions").insert({survey_id:selected.id,question_text:qForm.text.trim(),question_order:order});if(r.error){setNotice("خطا در ذخیره سؤال: "+r.error.message);return}setModal(null);await structure(selected.id)};
+ const saveQuestion=async(e:React.FormEvent)=>{
+  e.preventDefault();
+
+  if(!selected||!qForm.text.trim())return;
+
+  if(qForm.id){
+    const r=await supabase
+      .from("survey_questions")
+      .update({
+        question_text:qForm.text.trim()
+      })
+      .eq("id",qForm.id);
+
+    if(r.error){
+      setNotice("خطا در ذخیره سؤال: "+r.error.message);
+      return;
+    }
+  }else{
+    const order=questions.reduce(
+      (m,x)=>Math.max(m,x.question_order),
+      0
+    )+1;
+
+    const r=await supabase
+      .from("survey_questions")
+      .insert({
+        survey_id:selected.id,
+        question_text:qForm.text.trim(),
+        question_order:order
+      })
+      .select("id")
+      .single();
+
+    if(r.error){
+      setNotice("خطا در ذخیره سؤال: "+r.error.message);
+      return;
+    }
+
+    const values=sharedOptions
+      .map(x=>x.trim())
+      .filter(Boolean);
+
+    if(values.length>0){
+      const optionRows=values.map((text,index)=>({
+        question_id:r.data.id,
+        option_text:text,
+        option_order:index+1
+      }));
+
+      const optionResult=await supabase
+        .from("survey_options")
+        .insert(optionRows);
+
+      if(optionResult.error){
+        setNotice(
+          "سؤال ساخته شد اما گزینه‌های مشترک ذخیره نشد: "+
+          optionResult.error.message
+        );
+
+        setModal(null);
+        await structure(selected.id);
+        return;
+      }
+    }
+  }
+
+  setModal(null);
+  await structure(selected.id);
+};
+const applySharedOptions=async()=>{
+  if(!selected)return;
+
+  const values=sharedOptions
+    .map(x=>x.trim())
+    .filter(Boolean);
+
+  if(!values.length){
+    setNotice("حداقل یک گزینه مشترک وارد کنید.");
+    return;
+  }
+
+  const qs=questions.filter(q=>q.survey_id===selected.id);
+
+  if(!qs.length){
+    setNotice("ابتدا حداقل یک سؤال برای این نظرسنجی ایجاد کنید.");
+    return;
+  }
+
+  if(!confirm("گزینه‌های فعلی همه سؤال‌ها با این گزینه‌ها جایگزین شوند؟")){
+    return;
+  }
+
+  setBusy(true);
+
+  try{
+    const questionIds=qs.map(q=>q.id);
+
+    const del=await supabase
+      .from("survey_options")
+      .delete()
+      .in("question_id",questionIds);
+
+    if(del.error){
+      setNotice(
+        "حذف گزینه‌های قبلی انجام نشد: "+
+        del.error.message
+      );
+      return;
+    }
+
+    const rows=qs.flatMap(q =>
+      values.map((text,index)=>({
+        question_id:q.id,
+        option_text:text,
+        option_order:index+1
+      }))
+    );
+
+    const ins=await supabase
+      .from("survey_options")
+      .insert(rows);
+
+    if(ins.error){
+      setNotice(
+        "گزینه‌های مشترک ذخیره نشد: "+
+        ins.error.message
+      );
+      return;
+    }
+
+    await structure(selected.id);
+
+    setNotice(
+      "گزینه‌های مشترک برای تمام سؤال‌ها اعمال شد."
+    );
+  }finally{
+    setBusy(false);
+  }
+};
  const removeQuestion=async(id:number)=>{if(!confirm("سؤال حذف شود؟"))return;const r=await supabase.from("survey_questions").delete().eq("id",id);if(r.error)setNotice(r.error.message);else if(selected)await structure(selected.id)};
  const saveOption=async(e:React.FormEvent)=>{e.preventDefault();if(!oForm.question_id||!oForm.text.trim())return;const order=options.filter(x=>x.question_id===oForm.question_id).reduce((m,x)=>Math.max(m,x.option_order),0)+1;const r=oForm.id?await supabase.from("survey_options").update({option_text:oForm.text.trim()}).eq("id",oForm.id):await supabase.from("survey_options").insert({question_id:oForm.question_id,option_text:oForm.text.trim(),option_order:order});if(r.error){setNotice("خطا در ذخیره گزینه: "+r.error.message);return}setModal(null);if(selected)await structure(selected.id)};
  const removeOption=async(id:number)=>{if(!confirm("گزینه حذف شود؟"))return;const r=await supabase.from("survey_options").delete().eq("id",id);if(r.error)setNotice(r.error.message);else if(selected)await structure(selected.id)};
@@ -71,7 +215,7 @@ export default function App(){
   setSuggestion("");
   await structure(s.id);
 }} answers={answers} setAnswers={setAnswers} suggestion={suggestion} setSuggestion={setSuggestion} answer={answer} busy={busy} logout={logout} notice={notice} completions={completions} />;
- return <AdminView {...{profile,menu,setMenu,surveys,users,votes,suggestions,selected,setSelected,questions,options,stats,notice,setNotice,modal,setModal,surveyForm,setSurveyForm,qForm,setQForm,oForm,setOForm,uForm,setUForm,saveSurvey,removeSurvey,saveQuestion,removeQuestion,saveOption,removeOption,saveUser,toggleUser,loadSurveys,loadVotes,loadSuggestions,loadCompletions,structure,answerSurvey,setAnswerSurvey,answers,setAnswers,suggestion,setSuggestion,busy,setBusy,logout,completions,viewUser,setViewUser,viewSurvey,setViewSurvey,userSearch,setUserSearch,answerSurveyFilter,setAnswerSurveyFilter}}/>;
+ return <AdminView {...{profile,menu,setMenu,surveys,users,votes,suggestions,selected,setSelected,questions,options,stats,notice,setNotice,modal,setModal,surveyForm,setSurveyForm,qForm,setQForm,sharedOptions,setSharedOptions,oForm,setOForm,uForm,setUForm,saveSurvey,removeSurvey,saveQuestion,applySharedOptions,removeQuestion,saveOption,removeOption,saveUser,toggleUser,loadSurveys,loadVotes,loadSuggestions,loadCompletions,structure,answerSurvey,setAnswerSurvey,answers,setAnswers,suggestion,setSuggestion,busy,setBusy,logout,completions,viewUser,setViewUser,viewSurvey,setViewSurvey,userSearch,setUserSearch,answerSurveyFilter,setAnswerSurveyFilter}}/>;
 }
 
 function UserView(p:any){return <div className="user-page" dir="rtl"><header className="user-header"><div><strong>سامانه نظرسنجی</strong><span>پنل کاربری</span></div><button type="button" onClick={() => p.logout()} style={{display:"block",visibility:"visible",opacity:1,cursor:"pointer",border:"none",padding:"10px 18px",borderRadius:"10px",background:"#ef4444",color:"#fff",fontSize:"14px",fontFamily:"inherit"}}>🚪 خروج از حساب</button></header><main className="user-content"><section className="user-welcome"><div><span>خوش آمدید</span><h1>{p.profile.full_name} 👋</h1><p>نظرسنجی‌های فعال را مشاهده و در آن‌ها شرکت کنید.</p></div><div className="big-icon">🗳️</div></section>{p.profile.can_view_surveys===false?<div className="empty-state"><div>🔒</div><h3>دسترسی به نظرسنجی‌ها غیرفعال است</h3></div>:<div className="survey-user-grid">{!p.surveys.length?<div className="empty-state"><div>📋</div><h3>نظرسنجی فعالی وجود ندارد</h3></div>:p.surveys.map((s:Survey)=><article className="user-survey-card" key={s.id}><div className="card-icon">📋</div><h3>{s.title}</h3><p>{s.description||"برای شرکت کلیک کنید."}</p>{p.completions.some((c:any)=>c.survey_id===s.id&&c.user_id===p.profile.id)?<><span className="status active">✓ قبلاً شرکت کرده‌اید</span><button disabled>پاسخ ثبت شده</button></>:<button onClick={()=>p.setAnswerSurvey(s)}>شرکت در نظرسنجی</button>}</article>)}</div>}{p.answerSurvey&&<div className="modal-backdrop"><div className="modal large-modal"><div className="modal-header"><div><h2>{p.answerSurvey.title}</h2><p>{p.answerSurvey.description}</p></div><button className="close-button" onClick={()=>p.setAnswerSurvey(null)}>×</button></div>{p.questions.filter((q:Question)=>q.survey_id===p.answerSurvey.id).map((q:Question,i:number)=><div className="answer-question" key={q.id}><h3>{i+1}. {q.question_text}</h3>{p.options.filter((o:Option)=>o.question_id===q.id).map((o:Option)=><label className="radio-option" key={o.id}><input type="radio" name={'q'+q.id} checked={p.answers[q.id]===o.id} onChange={()=>p.setAnswers((x:any)=>({...x,[q.id]:o.id}))}/>{o.option_text}</label>)}</div>)}<div className="suggestion-box"><label>پیشنهاد کلی شما <span>(اختیاری)</span></label><textarea rows={4} value={p.suggestion} onChange={(e:any)=>p.setSuggestion(e.target.value)} placeholder="پیشنهاد شما درباره این نظرسنجی..."/></div>{p.notice&&<div className="message-box">{p.notice}</div>}<div className="form-actions"><button className="secondary-button" onClick={()=>p.setAnswerSurvey(null)}>انصراف</button><button className="primary-button" disabled={p.busy} onClick={p.answer}>{p.busy?"در حال ثبت...":"ثبت پاسخ‌ها"}</button></div></div></div>}</main></div>}
@@ -80,7 +224,79 @@ function AdminView(p:any){const nav=[['dashboard','🏠','داشبورد'],['sur
 
 function Dashboard({p}:any){return <><section className="welcome-card"><div><span className="welcome-label">مدیریت سامانه</span><h2>به پنل مدیریت خوش آمدید 👋</h2><p>نظرسنجی‌ها، کاربران، پاسخ‌ها و پیشنهادها را مدیریت کنید.</p></div><div className="welcome-icon">📊</div></section><section className="stats-grid">{[["📋","نظرسنجی‌ها",p.surveys.length],["👥","کاربران",p.users.length],["🗳️","پاسخ‌ها",p.votes.length],["💬","پیشنهادها",p.suggestions.length]].map(x=><div className="stat-card" key={x[1]}><div className="stat-icon">{x[0]}</div><div><span>{x[1]}</span><strong>{x[2]}</strong></div></div>)}</section></>}
 
-function Surveys({p}:any){return <section className="content-card"><div className="section-header"><div><h2>مدیریت نظرسنجی‌ها</h2><p>ایجاد، حذف، سؤال و گزینه</p></div><button className="primary-button" onClick={()=>{p.setSurveyForm({id:0,title:'',description:'',is_active:true});p.setModal('survey')}}>+ نظرسنجی جدید</button></div><div className="survey-admin-list">{p.surveys.map((s:Survey)=><div className="survey-admin-item" key={s.id}><div><h3>{s.title} <span className={s.is_active?'status active':'status inactive'}>{s.is_active?'فعال':'غیرفعال'}</span></h3><p>{s.description||'بدون توضیحات'}</p></div><div className="item-actions"><button className="secondary-button" onClick={async()=>{p.setSelected(s);await p.structure(s.id)}}> سؤال‌ها</button><button className="secondary-button" onClick={()=>{p.setSurveyForm({id:s.id,title:s.title,description:s.description||'',is_active:s.is_active});p.setModal('survey')}}>ویرایش</button><button className="danger-button" onClick={()=>p.removeSurvey(s.id)}>حذف</button></div></div>)}</div>{p.selected&&<div className="builder-panel"><div className="section-header"><div><h2>{p.selected.title}</h2><p>ساختار سؤال‌ها و گزینه‌ها</p></div><button className="secondary-button" onClick={()=>p.setSelected(null)}>بستن</button></div><button className="primary-button" onClick={()=>{p.setQForm({id:0,text:''});p.setModal('question')}}>+ سؤال</button>{p.questions.filter((q:Question)=>q.survey_id===p.selected.id).map((q:Question,i:number)=><div className="question-card" key={q.id}><div className="question-head"><h3>{i+1}. {q.question_text}</h3><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setQForm({id:q.id,text:q.question_text});p.setModal('question')}}>ویرایش</button><button className="danger-button" onClick={()=>p.removeQuestion(q.id)}>حذف</button></div></div>{p.options.filter((o:Option)=>o.question_id===q.id).map((o:Option)=><div className="option-row" key={o.id}>◉ {o.option_text}<span><button className="link-button" onClick={()=>{p.setOForm({id:o.id,question_id:q.id,text:o.option_text});p.setModal('option')}}>ویرایش</button><button className="link-button danger-text" onClick={()=>p.removeOption(o.id)}>حذف</button></span></div>)}<button className="add-option" onClick={()=>{p.setOForm({id:0,question_id:q.id,text:''});p.setModal('option')}}>+ افزودن گزینه</button></div>)}</div>}</section>}
+function Surveys({p}:any){return <section className="content-card"><div className="section-header"><div><h2>مدیریت نظرسنجی‌ها</h2><p>ایجاد، حذف، سؤال و گزینه</p></div><button className="primary-button" onClick={()=>{p.setSurveyForm({id:0,title:'',description:'',is_active:true});p.setModal('survey')}}>+ نظرسنجی جدید</button></div><div className="survey-admin-list">{p.surveys.map((s:Survey)=><div className="survey-admin-item" key={s.id}><div><h3>{s.title} <span className={s.is_active?'status active':'status inactive'}>{s.is_active?'فعال':'غیرفعال'}</span></h3><p>{s.description||'بدون توضیحات'}</p></div><div className="item-actions"><button className="secondary-button" onClick={async()=>{p.setSelected(s);await p.structure(s.id)}}> سؤال‌ها</button><button className="secondary-button" onClick={()=>{p.setSurveyForm({id:s.id,title:s.title,description:s.description||'',is_active:s.is_active});p.setModal('survey')}}>ویرایش</button><button className="danger-button" onClick={()=>p.removeSurvey(s.id)}>حذف</button></div></div>)}</div>{p.selected&&<div className="builder-panel"><div className="section-header"><div><h2>{p.selected.title}</h2><p>ساختار سؤال‌ها و گزینه‌ها</p></div><button className="secondary-button" onClick={()=>p.setSelected(null)}>بستن</button></div><div className="shared-options-panel">
+<div className="shared-options-title">
+  <div>
+    <h3>⚡ گزینه‌های یکسان برای همه سؤال‌ها</h3>
+    <p>
+      گزینه‌هایی که اینجا تعریف می‌کنید، هنگام ساخت سؤال جدید
+      به‌صورت خودکار اضافه می‌شوند.
+    </p>
+  </div>
+</div>
+
+<div className="shared-options-list">
+  {p.sharedOptions.map((value:string,index:number)=>(
+    <div className="shared-option-row" key={index}>
+
+      <span className="shared-option-number">
+        {index+1}
+      </span>
+
+      <input
+        value={value}
+        onChange={(e:any)=>
+          p.setSharedOptions((items:string[])=>
+            items.map((item:string,i:number)=>
+              i===index ? e.target.value : item
+            )
+          )
+        }
+        placeholder={`گزینه ${index+1}`}
+      />
+
+      <button
+        type="button"
+        className="shared-option-delete"
+        onClick={()=>
+          p.setSharedOptions((items:string[])=>
+            items.filter((_:string,i:number)=>i!==index)
+          )
+        }
+      >
+        🗑
+      </button>
+
+    </div>
+  ))}
+</div>
+
+<div className="shared-options-actions">
+
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={()=>
+      p.setSharedOptions((items:string[])=>
+        [...items,""]
+      )
+    }
+  >
+    ＋ افزودن گزینه
+  </button>
+
+  <button
+    type="button"
+    className="primary-button"
+    disabled={p.busy}
+    onClick={p.applySharedOptions}
+  >
+    ⚡ اعمال به همه سؤال‌ها
+  </button>
+
+</div>
+</div>
+<button className="primary-button" onClick={()=>{p.setQForm({id:0,text:''});p.setModal('question')}}>+ سؤال</button>{p.questions.filter((q:Question)=>q.survey_id===p.selected.id).map((q:Question,i:number)=><div className="question-card" key={q.id}><div className="question-head"><h3>{i+1}. {q.question_text}</h3><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setQForm({id:q.id,text:q.question_text});p.setModal('question')}}>ویرایش</button><button className="danger-button" onClick={()=>p.removeQuestion(q.id)}>حذف</button></div></div>{p.options.filter((o:Option)=>o.question_id===q.id).map((o:Option)=><div className="option-row" key={o.id}>◉ {o.option_text}<span><button className="link-button" onClick={()=>{p.setOForm({id:o.id,question_id:q.id,text:o.option_text});p.setModal('option')}}>ویرایش</button><button className="link-button danger-text" onClick={()=>p.removeOption(o.id)}>حذف</button></span></div>)}<button className="add-option" onClick={()=>{p.setOForm({id:0,question_id:q.id,text:''});p.setModal('option')}}>+ افزودن گزینه</button></div>)}</div>}</section>}
 
 function Users({p}:any){const filtered=p.users.filter((u:Profile)=>{const q=p.userSearch.trim().toLowerCase();return !q||u.username.toLowerCase().includes(q)||u.full_name.toLowerCase().includes(q)||(u.auth_email||"").toLowerCase().includes(q)});return <section className="content-card"><div className="section-header"><div><h2>کاربران</h2><p>افزودن، حذف، رمز عبور و سطح دسترسی</p></div><button className="primary-button" onClick={()=>{p.setUForm({id:'',username:'',full_name:'',email:'',password:'',is_admin:false,is_active:true,can_view_surveys:true,can_view_answers:true});p.setModal('user')}}>+ کاربر جدید</button></div><div className="toolbar"><input className="search-input" value={p.userSearch} onChange={(e:any)=>p.setUserSearch(e.target.value)} placeholder="جستجوی نام، نام کاربری یا ایمیل..."/><span className="toolbar-count">{filtered.length} کاربر</span></div><div className="table-wrap"><table><thead><tr><th>کاربر</th><th>ایمیل</th><th>نوع</th><th>وضعیت</th><th>نظرسنجی</th><th>پاسخ‌ها</th><th>عملیات</th></tr></thead><tbody>{filtered.map((u:Profile)=><tr key={u.id}><td><strong>{u.full_name}</strong><small>{u.username}</small></td><td>{u.auth_email||'—'}</td><td>{u.is_admin?'مدیر':'کاربر'}</td><td><span className={u.is_active?'status active':'status inactive'}>{u.is_active?'فعال':'غیرفعال'}</span></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_surveys')}>{u.can_view_surveys!==false?'فعال':'بسته'}</button></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_answers')}>{u.can_view_answers!==false?'فعال':'بسته'}</button></td><td><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setUForm({id:u.id,username:u.username,full_name:u.full_name,email:u.auth_email||'',password:'',is_admin:u.is_admin,is_active:u.is_active,can_view_surveys:u.can_view_surveys!==false,can_view_answers:u.can_view_answers!==false});p.setModal('user')}}>ویرایش</button><button className="secondary-button" onClick={()=>p.toggleUser(u,'is_active')}>{u.is_active?'غیرفعال':'فعال'}</button></div></td></tr>)}</tbody></table></div></section>}
 
