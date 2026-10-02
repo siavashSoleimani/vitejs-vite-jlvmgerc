@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabaseClient";
+import * as XLSX from "xlsx";
 
 type Profile={id:string;username:string;full_name:string;is_admin:boolean;is_active:boolean;auth_email?:string|null;can_view_surveys?:boolean;can_view_answers?:boolean;created_at?:string};
 type Survey={id:number;title:string;description:string|null;is_active:boolean;created_at:string;updated_at?:string};
@@ -19,6 +20,246 @@ export default function App(){
   "نمی‌پسندم",
   "نظری ندارم"
 ]);
+
+//excell
+const [excelUsers,setExcelUsers]=useState<any[]>([]);
+const [excelFileName,setExcelFileName]=useState("");
+const [showExcelPreview,setShowExcelPreview]=useState(false);
+const [excelImporting,setExcelImporting]=useState(false);
+
+const readExcelUsers=async(e:React.ChangeEvent<HTMLInputElement>)=>{
+  const file=e.target.files?.[0];
+  if(!file)return;
+
+  setExcelFileName(file.name);
+  setExcelUsers([]);
+  setShowExcelPreview(false);
+
+  try{
+    const buffer=await file.arrayBuffer();
+
+    const workbook=XLSX.read(buffer,{type:"array"});
+    const sheetName=workbook.SheetNames[0];
+
+    if(!sheetName){
+      setNotice("فایل Excel هیچ Sheet قابل خواندنی ندارد.");
+      return;
+    }
+
+    const sheet=workbook.Sheets[sheetName];
+
+    const rows=XLSX.utils.sheet_to_json<any>(sheet,{
+      defval:""
+    });
+
+    if(!rows.length){
+      setNotice("فایل Excel خالی است.");
+      return;
+    }
+
+    const requiredColumns=[
+      "username",
+      "full_name",
+      "email",
+      "password",
+      "is_active",
+      "can_view_surveys",
+      "can_view_answers"
+    ];
+
+    const firstRow=rows[0];
+
+    const missingColumns=requiredColumns.filter(
+      column=>!(column in firstRow)
+    );
+
+    if(missingColumns.length){
+      setNotice(
+        "ستون‌های زیر در فایل Excel وجود ندارند: "+
+        missingColumns.join(", ")
+      );
+      return;
+    }
+
+    const normalized=rows.map((row:any,index:number)=>{
+
+      const toBoolean=(value:any)=>{
+        if(typeof value==="boolean")return value;
+
+        const text=String(value)
+          .trim()
+          .toLowerCase();
+
+        return [
+          "true",
+          "1",
+          "yes",
+          "بله",
+          "فعال"
+        ].includes(text);
+      };
+
+      return {
+        rowNumber:index+2,
+        username:String(row.username||"").trim(),
+        full_name:String(row.full_name||"").trim(),
+        email:String(row.email||"").trim(),
+        password:String(row.password||""),
+        is_active:toBoolean(row.is_active),
+        can_view_surveys:toBoolean(row.can_view_surveys),
+        can_view_answers:toBoolean(row.can_view_answers)
+      };
+    });
+
+    const errors:string[]=[];
+
+    normalized.forEach((user:any)=>{
+      if(!user.username){
+        errors.push(`ردیف ${user.rowNumber}: username خالی است.`);
+      }
+
+      if(!user.email){
+        errors.push(`ردیف ${user.rowNumber}: email خالی است.`);
+      }
+
+      if(!user.password){
+        errors.push(`ردیف ${user.rowNumber}: password خالی است.`);
+      }
+    });
+
+    if(errors.length){
+      setNotice(
+        "فایل دارای خطا است:\n"+
+        errors.slice(0,10).join("\n")+
+        (errors.length>10?"\n...":"")
+      );
+      return;
+    }
+
+    const duplicateEmails=normalized
+      .map((user:any)=>user.email.toLowerCase())
+      .filter((email:string,index:number,array:string[])=>
+        array.indexOf(email)!==index
+      );
+
+    if(duplicateEmails.length){
+      setNotice(
+        "ایمیل تکراری در فایل وجود دارد: "+
+        [...new Set(duplicateEmails)].join(", ")
+      );
+      return;
+    }
+
+    const duplicateUsernames=normalized
+      .map((user:any)=>user.username.toLowerCase())
+      .filter((username:string,index:number,array:string[])=>
+        array.indexOf(username)!==index
+      );
+
+    if(duplicateUsernames.length){
+      setNotice(
+        "username تکراری در فایل وجود دارد: "+
+        [...new Set(duplicateUsernames)].join(", ")
+      );
+      return;
+    }
+
+    setExcelUsers(normalized);
+    setShowExcelPreview(true);
+
+    setNotice(
+      `${normalized.length} کاربر از فایل Excel خوانده شد.`
+    );
+
+  }catch(error:any){
+    setNotice(
+      "خطا در خواندن فایل Excel: "+
+      (error?.message||String(error))
+    );
+  }
+
+  e.target.value="";
+};
+
+
+const importExcelUsers=async()=>{
+  if(!excelUsers.length){
+    setNotice("ابتدا یک فایل Excel انتخاب کنید.");
+    return;
+  }
+
+  if(!confirm(
+    `آیا مطمئن هستید ${excelUsers.length} کاربر وارد/به‌روزرسانی شوند؟`
+  )){
+    return;
+  }
+
+  setExcelImporting(true);
+  
+
+  try{
+    const {
+      data:{
+        session
+      }
+    }=await supabase.auth.getSession();
+
+    if(!session){
+      setNotice("جلسه ورود شما منقضی شده است. دوباره وارد شوید.");
+      return;
+    }
+
+    const {
+      data,
+      error
+    }=await supabase.functions.invoke(
+      "import-users",
+      {
+        body:{
+          users:excelUsers
+        },
+        headers:{
+          Authorization:`Bearer ${session.access_token}`
+        }
+      }
+    );
+
+    if(error){
+      throw error;
+    }
+
+    if(!data?.success){
+      throw new Error(
+        data?.error ||
+        "خطا در ورود کاربران."
+      );
+    }
+
+   
+
+    setNotice(
+      `عملیات انجام شد: ${data.results.created} کاربر جدید، `+
+      `${data.results.updated} کاربر به‌روزرسانی شد.`
+    );
+
+    
+
+  }catch(error:any){
+
+    setNotice(
+      "خطا در ورود کاربران: "+
+      (
+        error?.message ||
+        "خطای نامشخص"
+      )
+    );
+
+  }finally{
+    setExcelImporting(false);
+  }
+};
+
+
  const [uForm,setUForm]=useState({id:"",username:"",full_name:"",email:"",password:"",is_admin:false,is_active:true,can_view_surveys:true,can_view_answers:true});
  const [answerSurvey,setAnswerSurvey]=useState<Survey|null>(null),[answers,setAnswers]=useState<Record<number,number>>({}),[suggestion,setSuggestion]=useState("");
  const [completions,setCompletions]=useState<any[]>([]),[viewUser,setViewUser]=useState<Profile|null>(null),[viewSurvey,setViewSurvey]=useState<Survey|null>(null);
@@ -215,7 +456,16 @@ const applySharedOptions=async()=>{
   setSuggestion("");
   await structure(s.id);
 }} answers={answers} setAnswers={setAnswers} suggestion={suggestion} setSuggestion={setSuggestion} answer={answer} busy={busy} logout={logout} notice={notice} completions={completions} />;
- return <AdminView {...{profile,menu,setMenu,surveys,users,votes,suggestions,selected,setSelected,questions,options,stats,notice,setNotice,modal,setModal,surveyForm,setSurveyForm,qForm,setQForm,sharedOptions,setSharedOptions,oForm,setOForm,uForm,setUForm,saveSurvey,removeSurvey,saveQuestion,applySharedOptions,removeQuestion,saveOption,removeOption,saveUser,toggleUser,loadSurveys,loadVotes,loadSuggestions,loadCompletions,structure,answerSurvey,setAnswerSurvey,answers,setAnswers,suggestion,setSuggestion,busy,setBusy,logout,completions,viewUser,setViewUser,viewSurvey,setViewSurvey,userSearch,setUserSearch,answerSurveyFilter,setAnswerSurveyFilter}}/>;
+ return <AdminView {...{profile,menu,setMenu,surveys,users,votes,suggestions,selected,setSelected,questions,options,stats,notice,setNotice,modal,setModal,surveyForm,setSurveyForm,qForm,setQForm,sharedOptions,setSharedOptions,readExcelUsers,
+  excelUsers,
+  setExcelUsers,
+  excelFileName,
+  setExcelFileName,
+  showExcelPreview,
+  setShowExcelPreview,
+  excelImporting,
+  setExcelImporting,
+  importExcelUsers,oForm,setOForm,uForm,setUForm,saveSurvey,removeSurvey,saveQuestion,applySharedOptions,removeQuestion,saveOption,removeOption,saveUser,toggleUser,loadSurveys,loadVotes,loadSuggestions,loadCompletions,structure,answerSurvey,setAnswerSurvey,answers,setAnswers,suggestion,setSuggestion,busy,setBusy,logout,completions,viewUser,setViewUser,viewSurvey,setViewSurvey,userSearch,setUserSearch,answerSurveyFilter,setAnswerSurveyFilter}}/>;
 }
 
 function UserView(p:any){return <div className="user-page" dir="rtl"><header className="user-header"><div><strong>سامانه نظرسنجی</strong><span>پنل کاربری</span></div><button type="button" onClick={() => p.logout()} style={{display:"block",visibility:"visible",opacity:1,cursor:"pointer",border:"none",padding:"10px 18px",borderRadius:"10px",background:"#ef4444",color:"#fff",fontSize:"14px",fontFamily:"inherit"}}>🚪 خروج از حساب</button></header><main className="user-content"><section className="user-welcome"><div><span>خوش آمدید</span><h1>{p.profile.full_name} 👋</h1><p>نظرسنجی‌های فعال را مشاهده و در آن‌ها شرکت کنید.</p></div><div className="big-icon">🗳️</div></section>{p.profile.can_view_surveys===false?<div className="empty-state"><div>🔒</div><h3>دسترسی به نظرسنجی‌ها غیرفعال است</h3></div>:<div className="survey-user-grid">{!p.surveys.length?<div className="empty-state"><div>📋</div><h3>نظرسنجی فعالی وجود ندارد</h3></div>:p.surveys.map((s:Survey)=><article className="user-survey-card" key={s.id}><div className="card-icon">📋</div><h3>{s.title}</h3><p>{s.description||"برای شرکت کلیک کنید."}</p>{p.completions.some((c:any)=>c.survey_id===s.id&&c.user_id===p.profile.id)?<><span className="status active">✓ قبلاً شرکت کرده‌اید</span><button disabled>پاسخ ثبت شده</button></>:<button onClick={()=>p.setAnswerSurvey(s)}>شرکت در نظرسنجی</button>}</article>)}</div>}{p.answerSurvey&&<div className="modal-backdrop"><div className="modal large-modal"><div className="modal-header"><div><h2>{p.answerSurvey.title}</h2><p>{p.answerSurvey.description}</p></div><button className="close-button" onClick={()=>p.setAnswerSurvey(null)}>×</button></div>{p.questions.filter((q:Question)=>q.survey_id===p.answerSurvey.id).map((q:Question,i:number)=><div className="answer-question" key={q.id}><h3>{i+1}. {q.question_text}</h3>{p.options.filter((o:Option)=>o.question_id===q.id).map((o:Option)=><label className="radio-option" key={o.id}><input type="radio" name={'q'+q.id} checked={p.answers[q.id]===o.id} onChange={()=>p.setAnswers((x:any)=>({...x,[q.id]:o.id}))}/>{o.option_text}</label>)}</div>)}<div className="suggestion-box"><label>پیشنهاد کلی شما <span>(اختیاری)</span></label><textarea rows={4} value={p.suggestion} onChange={(e:any)=>p.setSuggestion(e.target.value)} placeholder="پیشنهاد شما درباره این نظرسنجی..."/></div>{p.notice&&<div className="message-box">{p.notice}</div>}<div className="form-actions"><button className="secondary-button" onClick={()=>p.setAnswerSurvey(null)}>انصراف</button><button className="primary-button" disabled={p.busy} onClick={p.answer}>{p.busy?"در حال ثبت...":"ثبت پاسخ‌ها"}</button></div></div></div>}</main></div>}
@@ -298,7 +548,147 @@ function Surveys({p}:any){return <section className="content-card"><div classNam
 </div>
 <button className="primary-button" onClick={()=>{p.setQForm({id:0,text:''});p.setModal('question')}}>+ سؤال</button>{p.questions.filter((q:Question)=>q.survey_id===p.selected.id).map((q:Question,i:number)=><div className="question-card" key={q.id}><div className="question-head"><h3>{i+1}. {q.question_text}</h3><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setQForm({id:q.id,text:q.question_text});p.setModal('question')}}>ویرایش</button><button className="danger-button" onClick={()=>p.removeQuestion(q.id)}>حذف</button></div></div>{p.options.filter((o:Option)=>o.question_id===q.id).map((o:Option)=><div className="option-row" key={o.id}>◉ {o.option_text}<span><button className="link-button" onClick={()=>{p.setOForm({id:o.id,question_id:q.id,text:o.option_text});p.setModal('option')}}>ویرایش</button><button className="link-button danger-text" onClick={()=>p.removeOption(o.id)}>حذف</button></span></div>)}<button className="add-option" onClick={()=>{p.setOForm({id:0,question_id:q.id,text:''});p.setModal('option')}}>+ افزودن گزینه</button></div>)}</div>}</section>}
 
-function Users({p}:any){const filtered=p.users.filter((u:Profile)=>{const q=p.userSearch.trim().toLowerCase();return !q||u.username.toLowerCase().includes(q)||u.full_name.toLowerCase().includes(q)||(u.auth_email||"").toLowerCase().includes(q)});return <section className="content-card"><div className="section-header"><div><h2>کاربران</h2><p>افزودن، حذف، رمز عبور و سطح دسترسی</p></div><button className="primary-button" onClick={()=>{p.setUForm({id:'',username:'',full_name:'',email:'',password:'',is_admin:false,is_active:true,can_view_surveys:true,can_view_answers:true});p.setModal('user')}}>+ کاربر جدید</button></div><div className="toolbar"><input className="search-input" value={p.userSearch} onChange={(e:any)=>p.setUserSearch(e.target.value)} placeholder="جستجوی نام، نام کاربری یا ایمیل..."/><span className="toolbar-count">{filtered.length} کاربر</span></div><div className="table-wrap"><table><thead><tr><th>کاربر</th><th>ایمیل</th><th>نوع</th><th>وضعیت</th><th>نظرسنجی</th><th>پاسخ‌ها</th><th>عملیات</th></tr></thead><tbody>{filtered.map((u:Profile)=><tr key={u.id}><td><strong>{u.full_name}</strong><small>{u.username}</small></td><td>{u.auth_email||'—'}</td><td>{u.is_admin?'مدیر':'کاربر'}</td><td><span className={u.is_active?'status active':'status inactive'}>{u.is_active?'فعال':'غیرفعال'}</span></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_surveys')}>{u.can_view_surveys!==false?'فعال':'بسته'}</button></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_answers')}>{u.can_view_answers!==false?'فعال':'بسته'}</button></td><td><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setUForm({id:u.id,username:u.username,full_name:u.full_name,email:u.auth_email||'',password:'',is_admin:u.is_admin,is_active:u.is_active,can_view_surveys:u.can_view_surveys!==false,can_view_answers:u.can_view_answers!==false});p.setModal('user')}}>ویرایش</button><button className="secondary-button" onClick={()=>p.toggleUser(u,'is_active')}>{u.is_active?'غیرفعال':'فعال'}</button></div></td></tr>)}</tbody></table></div></section>}
+function Users({p}:any){const filtered=p.users.filter((u:Profile)=>{const q=p.userSearch.trim().toLowerCase();return !q||u.username.toLowerCase().includes(q)||u.full_name.toLowerCase().includes(q)||(u.auth_email||"").toLowerCase().includes(q)});return <section className="content-card"><div className="section-header"><div><h2>کاربران</h2>
+<div className="excel-import-box">
+
+<div className="excel-import-header">
+  <div>
+    <h3>📊 ورود گروهی کاربران از Excel</h3>
+    <p>
+      کاربران جدید ایجاد و اطلاعات کاربران موجود به‌روزرسانی می‌شوند.
+    </p>
+  </div>
+</div>
+
+<div className="excel-upload-area">
+
+  <label className="excel-upload-button">
+    📁 انتخاب فایل Excel
+
+    <input
+      type="file"
+      accept=".xlsx,.xls"
+      style={{display:"none"}}
+      onChange={p.readExcelUsers}
+    />
+  </label>
+
+  {p.excelFileName && (
+    <div className="excel-file-name">
+      📄 {p.excelFileName}
+    </div>
+  )}
+
+</div>
+
+{p.excelUsers.length>0 && p.showExcelPreview && (
+
+  <div className="excel-preview">
+
+    <div className="excel-preview-header">
+
+      <div>
+        <h4>پیش‌نمایش کاربران</h4>
+
+        <span>
+          {p.excelUsers.length} کاربر آماده ورود
+        </span>
+      </div>
+
+    </div>
+
+    <div className="excel-table-wrapper">
+
+      <table className="excel-table">
+
+        <thead>
+          <tr>
+            <th>ردیف</th>
+            <th>نام کاربری</th>
+            <th>نام کامل</th>
+            <th>ایمیل</th>
+            <th>رمز عبور</th>
+            <th>فعال</th>
+            <th>نظرسنجی</th>
+            <th>پاسخ‌ها</th>
+          </tr>
+        </thead>
+
+        <tbody>
+
+          {p.excelUsers.map((user:any,index:number)=>(
+
+            <tr key={index}>
+
+              <td>{user.rowNumber}</td>
+
+              <td>{user.username}</td>
+
+              <td>{user.full_name}</td>
+
+              <td>{user.email}</td>
+
+              <td>
+                <span className="password-preview">
+                  ••••••••
+                </span>
+              </td>
+
+              <td>
+                {user.is_active ? "✅" : "❌"}
+              </td>
+
+              <td>
+                {user.can_view_surveys ? "✅" : "❌"}
+              </td>
+
+              <td>
+                {user.can_view_answers ? "✅" : "❌"}
+              </td>
+
+            </tr>
+
+          ))}
+
+        </tbody>
+
+      </table>
+
+    </div>
+
+    <div className="excel-import-actions">
+
+      <button
+        type="button"
+        className="secondary-button"
+        onClick={()=>{
+          p.setExcelUsers([]);
+          p.setExcelFileName("");
+          p.setShowExcelPreview(false);
+        }}
+      >
+        پاک کردن فایل
+      </button>
+
+      <button
+        type="button"
+        className="primary-button"
+        disabled={p.excelImporting}
+        onClick={p.importExcelUsers}
+      >
+        {p.excelImporting
+          ? "در حال ورود کاربران..."
+          : "🚀 ورود کاربران به سیستم"}
+      </button>
+
+    </div>
+
+  </div>
+
+)}
+
+</div>
+<p>افزودن، حذف، رمز عبور و سطح دسترسی</p></div><button className="primary-button" onClick={()=>{p.setUForm({id:'',username:'',full_name:'',email:'',password:'',is_admin:false,is_active:true,can_view_surveys:true,can_view_answers:true});p.setModal('user')}}>+ کاربر جدید</button></div><div className="toolbar"><input className="search-input" value={p.userSearch} onChange={(e:any)=>p.setUserSearch(e.target.value)} placeholder="جستجوی نام، نام کاربری یا ایمیل..."/><span className="toolbar-count">{filtered.length} کاربر</span></div><div className="table-wrap"><table><thead><tr><th>کاربر</th><th>ایمیل</th><th>نوع</th><th>وضعیت</th><th>نظرسنجی</th><th>پاسخ‌ها</th><th>عملیات</th></tr></thead><tbody>{filtered.map((u:Profile)=><tr key={u.id}><td><strong>{u.full_name}</strong><small>{u.username}</small></td><td>{u.auth_email||'—'}</td><td>{u.is_admin?'مدیر':'کاربر'}</td><td><span className={u.is_active?'status active':'status inactive'}>{u.is_active?'فعال':'غیرفعال'}</span></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_surveys')}>{u.can_view_surveys!==false?'فعال':'بسته'}</button></td><td><button className="toggle-button" onClick={()=>p.toggleUser(u,'can_view_answers')}>{u.can_view_answers!==false?'فعال':'بسته'}</button></td><td><div className="item-actions"><button className="secondary-button" onClick={()=>{p.setUForm({id:u.id,username:u.username,full_name:u.full_name,email:u.auth_email||'',password:'',is_admin:u.is_admin,is_active:u.is_active,can_view_surveys:u.can_view_surveys!==false,can_view_answers:u.can_view_answers!==false});p.setModal('user')}}>ویرایش</button><button className="secondary-button" onClick={()=>p.toggleUser(u,'is_active')}>{u.is_active?'غیرفعال':'فعال'}</button></div></td></tr>)}</tbody></table></div></section>}
 
 function Answers({p}:any){
  const filteredCompletions=p.completions.filter((c:any)=>!p.answerSurveyFilter||c.survey_id===p.answerSurveyFilter);
