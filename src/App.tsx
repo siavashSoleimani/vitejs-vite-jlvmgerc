@@ -272,7 +272,53 @@ const importExcelUsers=async()=>{
  useEffect(()=>{let alive=true;(async()=>{const {data:{session}}=await supabase.auth.getSession();if(alive&&session?.user)await profileOf(session.user.id);if(alive)setLoading(false)})();const {data}=supabase.auth.onAuthStateChange(async(_,s)=>{if(s?.user)await profileOf(s.user.id);else setProfile(null);setLoading(false)});return()=>{alive=false;data.subscription.unsubscribe()}},[]);
  const login=async(e:React.FormEvent)=>{e.preventDefault();setMessage("");if(!username.trim()||!password)return setMessage("نام کاربری و رمز عبور را وارد کنید.");setLoginLoading(true);try{const {data:email,error}=await supabase.rpc("get_login_email",{p_username:username.trim()});if(error||!email)return setMessage("نام کاربری یا رمز عبور اشتباه است.");const {data,error:le}=await supabase.auth.signInWithPassword({email,password});if(le||!data.user)return setMessage("نام کاربری یا رمز عبور اشتباه است.");await profileOf(data.user.id)}finally{setLoginLoading(false)}};
  const logout=async()=>{await supabase.auth.signOut();setProfile(null);setUsername("");setPassword("");setMenu("dashboard")};
- const loadSurveys=async()=>{const {data,error}=await supabase.from("surveys").select("id,title,description,is_active,created_at,updated_at").order("created_at",{ascending:false});if(error)setNotice(error.message);else setSurveys(data||[])};
+ const loadSurveys=async()=>{
+
+  // مدیر همه نظرسنجی‌ها را می‌بیند
+  if(profile?.is_admin){
+
+    const {data,error}=await supabase
+      .from("surveys")
+      .select("id,title,description,is_active,created_at,updated_at")
+      .order("created_at",{ascending:false});
+
+    if(error){
+      setNotice(error.message);
+      return;
+    }
+
+    setSurveys(data||[]);
+    return;
+  }
+
+
+  // کاربری که اجازه مشاهده نظرسنجی‌ها ندارد
+  if(profile?.can_view_surveys===false){
+    setSurveys([]);
+    return;
+  }
+
+
+  // کاربر عادی:
+  // فقط نظرسنجی‌های مجاز توسط تابع دیتابیس
+  const {data,error}=await supabase
+    .rpc("get_visible_surveys");
+
+
+  if(error){
+
+    setNotice(
+      "خطا در دریافت نظرسنجی‌ها: "+
+      error.message
+    );
+
+    return;
+  }
+
+
+  setSurveys(data||[]);
+};
+
  const openSurveyForm=async(s?:Survey)=>{
   setNotice("");
   setSurveyUserSearch("");
@@ -348,8 +394,115 @@ const importExcelUsers=async()=>{
 
   setSuggestions(normalizedSuggestions);
 };
- const structure=async(sid:number)=>{const {data:q,error:qe}=await supabase.from("survey_questions").select("id,survey_id,question_text,question_order").eq("survey_id",sid).order("question_order");if(qe){setNotice(qe.message);return}setQuestions(q||[]);const ids=(q||[]).map(x=>x.id);if(!ids.length)return setOptions([]);const {data:o}=await supabase.from("survey_options").select("id,question_id,option_text,option_order").in("question_id",ids).order("option_order");setOptions(o||[])};
- useEffect(()=>{if(!profile)return;loadSurveys();loadCompletions();if(profile.is_admin){loadUsers();loadVotes();loadSuggestions()}},[profile]);
+const structure=async(sid:number)=>{
+
+  /*
+   * بررسی می‌کنیم که کاربر اجازه دسترسی
+   * به این نظرسنجی را دارد یا نه.
+   */
+
+  if(!profile?.is_admin){
+
+    const {data:accessRows,error:accessError}=await supabase
+      .from("survey_access")
+      .select("user_id")
+      .eq("survey_id",sid);
+
+    if(accessError){
+      setNotice(
+        "خطا در بررسی دسترسی: "+
+        accessError.message
+      );
+      return;
+    }
+
+    /*
+     * هیچ رکوردی یعنی نظرسنجی عمومی است.
+     */
+    const isPublic=
+      !accessRows ||
+      accessRows.length===0;
+
+    /*
+     * اگر خصوصی باشد، کاربر باید در لیست باشد.
+     */
+    const hasAccess=
+      isPublic ||
+      accessRows.some(
+        (x:any)=>x.user_id===profile!.id
+      );
+
+    if(!hasAccess){
+      setQuestions([]);
+      setOptions([]);
+
+      setNotice(
+        "شما اجازه دسترسی به این نظرسنجی را ندارید."
+      );
+
+      return;
+    }
+  }
+
+
+  /*
+   * کاربر مجاز است؛ حالا سؤال‌ها را می‌گیریم.
+   */
+
+  const {
+    data:q,
+    error:qe
+  }=await supabase
+    .from("survey_questions")
+    .select(
+      "id,survey_id,question_text,question_order"
+    )
+    .eq("survey_id",sid)
+    .order("question_order");
+
+
+  if(qe){
+    setNotice(qe.message);
+    return;
+  }
+
+
+  setQuestions(q||[]);
+
+
+  const ids=(q||[]).map(
+    (x:any)=>x.id
+  );
+
+
+  if(!ids.length){
+    setOptions([]);
+    return;
+  }
+
+
+  const {
+    data:o,
+    error:oe
+  }=await supabase
+    .from("survey_options")
+    .select(
+      "id,question_id,option_text,option_order"
+    )
+    .in("question_id",ids)
+    .order("option_order");
+
+
+  if(oe){
+    setNotice(oe.message);
+    return;
+  }
+
+
+  setOptions(o||[]);
+};
+
+useEffect(()=>{if(!profile)return;loadSurveys();loadCompletions();if(profile.is_admin){loadUsers();loadVotes();loadSuggestions()}},[profile]);
  const saveSurvey=async(e:React.FormEvent)=>{
   e.preventDefault();
 
@@ -614,15 +767,285 @@ const applySharedOptions=async()=>{
  const removeOption=async(id:number)=>{if(!confirm("گزینه حذف شود؟"))return;const r=await supabase.from("survey_options").delete().eq("id",id);if(r.error)setNotice(r.error.message);else if(selected)await structure(selected.id)};
  const saveUser=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);try{if(uForm.id){const {error}=await supabase.from("profiles").update({username:uForm.username.trim(),full_name:uForm.full_name.trim(),is_admin:uForm.is_admin,is_active:uForm.is_active,can_view_surveys:uForm.can_view_surveys,can_view_answers:uForm.can_view_answers}).eq("id",uForm.id);if(error)return setNotice(error.message)}else{if(!uForm.username||!uForm.email||!uForm.password)return setNotice("نام کاربری، ایمیل و رمز عبور الزامی است.");const {data,error}=await supabase.functions.invoke("create-user",{body:{username:uForm.username.trim(),full_name:uForm.full_name.trim(),email:uForm.email.trim(),password:uForm.password,is_admin:uForm.is_admin,is_active:uForm.is_active,can_view_surveys:uForm.can_view_surveys,can_view_answers:uForm.can_view_answers}});if(error)return setNotice("ایجاد حساب انجام نشد: "+error.message);if(data?.error)return setNotice("ایجاد حساب انجام نشد: "+data.error)}setModal(null);await loadUsers()}finally{setBusy(false)}};
  const toggleUser=async(u:Profile,field:string)=>{const {error}=await supabase.from("profiles").update({[field]:!(u as any)[field]}).eq("id",u.id);if(error)setNotice(error.message);else loadUsers()};
- const answer=async()=>{if(!profile||!answerSurvey)return;const already= completions.some((c:any)=>c.survey_id===answerSurvey.id&&c.user_id===profile.id);if(already){setNotice("شما قبلاً در این نظرسنجی شرکت کرده‌اید.");return}const qs=questions.filter(q=>q.survey_id===answerSurvey.id);if(qs.some(q=>!answers[q.id]))return setNotice("به همه سؤال‌ها پاسخ دهید.");setBusy(true);const {data:done}=await supabase.from("survey_completions").select("id").eq("survey_id",answerSurvey.id).eq("user_id",profile.id).maybeSingle();if(done){setNotice("شما قبلاً در این نظرسنجی شرکت کرده‌اید.");setBusy(false);return}const {error}=await supabase.from("survey_votes").insert(qs.map(q=>({survey_id:answerSurvey.id,question_id:q.id,option_id:answers[q.id],user_id:profile.id})));if(error){setNotice(error.message);setBusy(false);return}const c=await supabase.from("survey_completions").insert({survey_id:answerSurvey.id,user_id:profile.id});if(c.error){setNotice(c.error.message);setBusy(false);return}if(suggestion.trim())await supabase.from("suggestions").insert({user_id:profile.id,survey_id:answerSurvey.id,suggestion_text:suggestion.trim()});await loadCompletions();setAnswerSurvey(null);setSuggestion("");setAnswers({});setBusy(false);setNotice("پاسخ با موفقیت ثبت شد.")};
+ const answer=async()=>{
+
+  if(!profile||!answerSurvey)return;
+
+
+  /*
+   * بررسی دسترسی کاربر به نظرسنجی
+   */
+
+  if(!profile.is_admin){
+
+    const {
+      data:accessRows,
+      error:accessError
+    }=await supabase
+      .from("survey_access")
+      .select("user_id")
+      .eq("survey_id",answerSurvey.id);
+
+
+    if(accessError){
+
+      setNotice(
+        "خطا در بررسی دسترسی: "+
+        accessError.message
+      );
+
+      return;
+    }
+
+
+    /*
+     * بدون رکورد = نظرسنجی عمومی
+     */
+
+    const isPublic=
+      !accessRows ||
+      accessRows.length===0;
+
+
+    /*
+     * اگر خصوصی است، کاربر باید مجاز باشد
+     */
+
+    const hasAccess=
+      isPublic ||
+      accessRows.some(
+        (x:any)=>x.user_id===profile.id
+      );
+
+
+    if(!hasAccess){
+
+      setNotice(
+        "شما اجازه شرکت در این نظرسنجی را ندارید."
+      );
+
+      return;
+    }
+
+  }
+
+
+  /*
+   * بررسی شرکت قبلی
+   */
+
+  const already=
+    completions.some(
+      (c:any)=>
+        c.survey_id===answerSurvey.id &&
+        c.user_id===profile.id
+    );
+
+
+  if(already){
+
+    setNotice(
+      "شما قبلاً در این نظرسنجی شرکت کرده‌اید."
+    );
+
+    return;
+  }
+
+
+  /*
+   * بررسی پاسخ همه سؤال‌ها
+   */
+
+  const qs=
+    questions.filter(
+      q=>q.survey_id===answerSurvey.id
+    );
+
+
+  if(
+    qs.some(
+      q=>!answers[q.id]
+    )
+  ){
+
+    setNotice(
+      "به همه سؤال‌ها پاسخ دهید."
+    );
+
+    return;
+  }
+
+
+  setBusy(true);
+
+
+  /*
+   * بررسی دوباره در دیتابیس
+   */
+
+  const {
+    data:done,
+    error:doneError
+  }=await supabase
+    .from("survey_completions")
+    .select("id")
+    .eq("survey_id",answerSurvey.id)
+    .eq("user_id",profile.id)
+    .maybeSingle();
+
+
+  if(doneError){
+
+    setNotice(doneError.message);
+
+    setBusy(false);
+
+    return;
+  }
+
+
+  if(done){
+
+    setNotice(
+      "شما قبلاً در این نظرسنجی شرکت کرده‌اید."
+    );
+
+    setBusy(false);
+
+    return;
+  }
+
+
+  /*
+   * ثبت پاسخ‌ها
+   */
+
+  const {
+    error
+  }=await supabase
+    .from("survey_votes")
+    .insert(
+      qs.map(
+        q=>({
+          survey_id:answerSurvey.id,
+          question_id:q.id,
+          option_id:answers[q.id],
+          user_id:profile.id
+        })
+      )
+    );
+
+
+  if(error){
+
+    setNotice(error.message);
+
+    setBusy(false);
+
+    return;
+  }
+
+
+  /*
+   * ثبت تکمیل نظرسنجی
+   */
+
+  const c=
+    await supabase
+      .from("survey_completions")
+      .insert({
+        survey_id:answerSurvey.id,
+        user_id:profile.id
+      });
+
+
+  if(c.error){
+
+    setNotice(c.error.message);
+
+    setBusy(false);
+
+    return;
+  }
+
+
+  /*
+   * ثبت پیشنهاد
+   */
+
+  if(suggestion.trim()){
+
+    await supabase
+      .from("suggestions")
+      .insert({
+        user_id:profile.id,
+        survey_id:answerSurvey.id,
+        suggestion_text:suggestion.trim()
+      });
+
+  }
+
+
+  await loadCompletions();
+
+
+  setAnswerSurvey(null);
+
+  setSuggestion("");
+
+  setAnswers({});
+
+  setBusy(false);
+
+  setNotice(
+    "پاسخ با موفقیت ثبت شد."
+  );
+
+};
  const stats=useMemo(()=>{if(!selected)return[];return questions.filter(q=>q.survey_id===selected.id).map(q=>{const os=options.filter(o=>o.question_id===q.id).map(o=>{const count=votes.filter(v=>v.survey_id===selected.id&&v.question_id===q.id&&v.option_id===o.id).length;return {...o,count}});const total=os.reduce((a,x)=>a+x.count,0);return{q,os:os.map(o=>({...o,pct:total?Math.round(o.count*100/total):0})),total}})},[selected,questions,options,votes]);
  if(loading)return <div className="app"><div className="loading-screen">در حال بارگذاری...</div></div>;
  if(!profile)return <div className="app" dir="rtl"><div className="login-card"><div className="logo">✓</div><h1>ورود به سامانه</h1><p className="subtitle">برای ادامه وارد حساب کاربری خود شوید</p><form onSubmit={login}><label>نام کاربری</label><input value={username} onChange={e=>setUsername(e.target.value)} /><label>رمز عبور</label><input type="password" value={password} onChange={e=>setPassword(e.target.value)}/><button disabled={loginLoading}>{loginLoading?"در حال ورود...":"ورود"}</button></form>{message&&<div className="error-message">{message}</div>}</div></div>;
  if(!profile.is_admin)return <UserView profile={profile} surveys={surveys.filter(s=>s.is_active)} questions={questions} options={options} answerSurvey={answerSurvey} setAnswerSurvey={async (s: Survey) => {
-  setAnswerSurvey(s);
-  setAnswers({});
-  setSuggestion("");
-  await structure(s.id);
+// بررسی دسترسی کاربر به این نظرسنجی
+const {data:accessRows,error:accessError}=await supabase
+  .from("survey_access")
+  .select("user_id")
+  .eq("survey_id",s.id);
+
+if(accessError){
+  setNotice(
+    "خطا در بررسی دسترسی: "+
+    accessError.message
+  );
+  return;
+}
+
+// اگر برای این نظرسنجی دسترسی خاصی تعریف نشده باشد,
+// یعنی نظرسنجی عمومی است و همه کاربران می‌توانند وارد شوند.
+const isPublic=!accessRows || accessRows.length===0;
+
+// اگر محدود است، کاربر باید در لیست مجاز باشد.
+const hasAccess=
+  isPublic ||
+  accessRows.some(
+    (x:any)=>x.user_id===profile?.id
+  );
+
+if(!hasAccess){
+  setNotice(
+    "شما اجازه شرکت در این نظرسنجی را ندارید."
+  );
+  return;
+}
+
+// دسترسی تأیید شد
+setAnswerSurvey(s);
+
+setAnswers({});
+
+setSuggestion("");
+
+await structure(s.id);
 }} answers={answers} setAnswers={setAnswers} suggestion={suggestion} setSuggestion={setSuggestion} answer={answer} busy={busy} logout={logout} notice={notice} completions={completions} />;
  return <AdminView {...{profile,menu,setMenu,surveys,users,votes,suggestions,selected,setSelected,questions,options,stats,notice,setNotice,modal,setModal,surveyForm,setSurveyForm,openSurveyForm,
   surveyAccessMode,
